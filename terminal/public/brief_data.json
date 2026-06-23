@@ -1,0 +1,109 @@
+{
+  "generated_date": "2026-06-19",
+  "has_anomaly": true,
+  "anomaly_banner": "WATCH: WTI Crude DOWN 16.2% over 5 days \u00b7 MDI feedstock cost impact expected in 2\u20133 weeks",
+  "commodities": [
+    {
+      "label": "WTI Crude Oil",
+      "sublabel": "MDI feedstock input",
+      "value": "$76.54",
+      "unit": "/bbl",
+      "change": -0.08,
+      "period": "1d",
+      "status": "ok",
+      "note": "Feedstock stable"
+    },
+    {
+      "label": "Natural Gas",
+      "sublabel": "Plant energy cost",
+      "value": "$3.20",
+      "unit": "/MMBtu",
+      "change": -1.08,
+      "period": "1d",
+      "status": "ok",
+      "note": "Plant energy stable"
+    },
+    {
+      "label": "XLB Materials",
+      "sublabel": "Sector benchmark",
+      "value": "$51.81",
+      "unit": "",
+      "change": -0.4,
+      "period": "1d",
+      "status": "ok",
+      "note": "In line with market"
+    },
+    {
+      "label": "S&P 500",
+      "sublabel": "Demand environment",
+      "value": "7,501",
+      "unit": "",
+      "change": 1.58,
+      "period": "5d",
+      "status": "ok",
+      "note": "Demand environment stable"
+    },
+    {
+      "label": "Brent Crude",
+      "sublabel": "Asia feedstock proxy",
+      "value": "$80.59",
+      "unit": "/bbl",
+      "change": 0.93,
+      "period": "1d",
+      "status": "ok",
+      "note": "Asia proxy stable"
+    },
+    {
+      "label": "EUR / USD",
+      "sublabel": "Export pricing FX",
+      "value": "1.1500",
+      "unit": "",
+      "change": -0.33,
+      "period": "1d",
+      "status": "ok",
+      "note": "FX stable"
+    }
+  ],
+  "macro": [
+    {
+      "label": "Housing Starts",
+      "value": "\u2014",
+      "unit": "units/mo",
+      "change": 0,
+      "period": "MoM",
+      "status": "ok",
+      "note": "Run brief to populate",
+      "fred": "HOUST"
+    },
+    {
+      "label": "Fed Funds Rate",
+      "value": "\u2014",
+      "unit": "",
+      "change": 0,
+      "period": "MoM",
+      "status": "ok",
+      "note": "Run brief to populate",
+      "fred": "FEDFUNDS"
+    },
+    {
+      "label": "Real GDP Growth",
+      "value": "\u2014",
+      "unit": "annlzd",
+      "change": 0,
+      "period": "QoQ",
+      "status": "ok",
+      "note": "Run brief to populate",
+      "fred": "A191RL1Q225SBEA"
+    },
+    {
+      "label": "PPI Chemicals",
+      "value": "\u2014",
+      "unit": "index",
+      "change": 0,
+      "period": "MoM",
+      "status": "ok",
+      "note": "Run brief to populate",
+      "fred": "PCU325325"
+    }
+  ]
+}

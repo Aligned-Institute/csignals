@@ -1,0 +1,26 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Node / Next.js
+terminal/node_modules/
+terminal/.next/
+terminal/tsconfig.tsbuildinfo
+
+# Environment files (keep .env.example)
+.env
+.env.local
+.env.*.local
+config/.env
+
+# Build outputs
+output/
+
+# Claude internal
+.claude/
+
+# macOS
+.DS_Store
