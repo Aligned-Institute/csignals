@@ -1,9 +1,11 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import Link from 'next/link';
 import { TrendingUp, TrendingDown, Minus, RefreshCw, Database, ExternalLink, Download } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { supabase } from '@/lib/supabase';
 
 // Commodity signals — updated by monday_brief.py run; reflects 2026-06-10 data
 const COMMODITY_CARDS = [
@@ -196,6 +198,46 @@ export default function DashboardPage() {
     'WTI Crude UP +2.95% in 1 session · Brent UP +2.64% · MDI feedstock cost impact expected in 2–3 weeks'
   );
 
+  const [alignedState, setAlignedState] = useState<{
+    aggregate_confidence: number;
+    agents: any[];
+    conflicts: any[];
+  } | null>(null);
+
+  useEffect(() => {
+    const fetchLatest = async () => {
+      try {
+        const { data, error } = await supabase
+          .from('aligned_states')
+          .select('*')
+          .order('aligned_at', { ascending: false })
+          .limit(1);
+        if (!error && data && data.length > 0) {
+          setAlignedState(data[0] as any);
+        }
+      } catch (err) {
+        console.error('Failed to fetch latest aligned state:', err);
+      }
+    };
+    fetchLatest();
+
+    const channel = supabase
+      .channel('aligned_states_cdc')
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'aligned_states' },
+        (payload) => {
+          console.log('Realtime Aligned State update:', payload.new);
+          setAlignedState(payload.new as any);
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, []);
+
   useEffect(() => {
     fetch('/brief_data.json')
       .then((r) => (r.ok ? r.json() : null))
@@ -218,24 +260,53 @@ export default function DashboardPage() {
     <div className="animate-page-in space-y-8">
 
       {/* Header */}
-      <div className="flex flex-wrap items-start justify-between gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-4 border-b border-border pb-4">
         <div>
-          <h1 className="text-2xl font-bold">Market Overview</h1>
+          <h1 className="text-2xl font-bold bg-gradient-to-r from-white to-[#00f3ff] bg-clip-text text-transparent">Market Overview</h1>
           <p className="text-muted-foreground dark:text-white/80 text-sm">
             Performance Products — Feedstock &amp; Macro Intelligence
           </p>
         </div>
-        <div className="flex items-center gap-3">
-          <span className="flex items-center gap-1.5 text-xs text-muted-foreground dark:text-white/60 font-mono">
-            <RefreshCw className="size-3" />
-            Last run: {generatedDate} · monday_brief.py
-          </span>
-          <a href="/api/export" download>
-            <Button variant="outline" size="sm" className="gap-1.5 text-xs">
-              <Download className="size-3.5" />
-              Export Excel
-            </Button>
-          </a>
+        
+        <div className="flex flex-wrap items-center gap-4">
+          {alignedState && (
+            <Link href="/alignment" className="flex items-center gap-3 bg-[#00f3ff]/5 border border-[#00f3ff]/20 hover:border-[#00f3ff]/50 px-4 py-2 rounded-xl backdrop-blur-md shadow-md transition-all duration-200 cursor-pointer select-none group">
+              <div className="flex flex-col">
+                <span className="text-[9px] text-muted-foreground uppercase font-mono tracking-wider">Aligned State</span>
+                <div className="flex items-center gap-1.5 mt-0.5">
+                  <span className="text-xs font-bold font-mono text-[#00f3ff]">
+                    Conf: {alignedState.aggregate_confidence.toFixed(2)}
+                  </span>
+                  <span className="text-xs text-muted-foreground/40">·</span>
+                  <span className="text-[11px] text-zinc-300 font-mono">
+                    {alignedState.agents?.length ?? 0} agents
+                  </span>
+                  {alignedState.conflicts && alignedState.conflicts.length > 0 && (
+                    <>
+                      <span className="text-xs text-zinc-300/40">·</span>
+                      <span className="text-[11px] text-[var(--color-warning)] font-mono animate-pulse">
+                        {alignedState.conflicts.length} conflict{alignedState.conflicts.length > 1 ? 's' : ''}
+                      </span>
+                    </>
+                  )}
+                </div>
+              </div>
+              <ExternalLink className="size-3.5 text-muted-foreground group-hover:text-[#00f3ff] transition-colors" />
+            </Link>
+          )}
+
+          <div className="flex flex-col items-end gap-1">
+            <span className="flex items-center gap-1.5 text-xs text-muted-foreground dark:text-white/60 font-mono">
+              <RefreshCw className="size-3" />
+              Last run: {generatedDate}
+            </span>
+            <a href="/api/export" download>
+              <Button variant="outline" size="sm" className="gap-1.5 text-xs h-7">
+                <Download className="size-3" />
+                Export Excel
+              </Button>
+            </a>
+          </div>
         </div>
       </div>
 

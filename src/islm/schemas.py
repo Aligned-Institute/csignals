@@ -61,4 +61,5 @@ class QueryResponse(BaseModel):
     thinking: Optional[str] = None
     sources: List[SourceDocument] = []
     latency_ms: float
+    aligned_state: Optional[Dict[str, Any]] = None
 

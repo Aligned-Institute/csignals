@@ -3,7 +3,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
   LayoutDashboard, Trophy, Briefcase, BarChart3, MessageCircle, Network,
-  LogOut, Sun, Moon, Menu, X, Search, Upload,
+  LogOut, Sun, Moon, Menu, X, Search, Upload, GitCompare, Settings
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useTheme } from "@/hooks/use-theme";
@@ -16,6 +16,8 @@ const navItems = [
   { href: "/ecosystem",         label: "Value Chain",       icon: Network         },
   { href: "/portfolio",         label: "Brief Archive",     icon: Briefcase       },
   { href: "/upload",            label: "Data Analyzer",     icon: Upload          },
+  { href: "/alignment",         label: "Alignment",         icon: GitCompare      },
+  { href: "/settings",          label: "Settings",          icon: Settings        },
 ];
 
 interface SidebarProps {

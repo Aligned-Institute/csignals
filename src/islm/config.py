@@ -1,10 +1,10 @@
 import os
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
-OLLAMA_MODEL = os.getenv("ISLM_MODEL", "gemma2:2b")
+OLLAMA_MODEL = os.getenv("ISLM_MODEL", "gemma3:4b")
 EMBED_MODEL = os.getenv("EMBED_MODEL", "nomic-embed-text")
 OLLAMA_EMBED_URL = os.getenv("OLLAMA_EMBED_URL", "http://localhost:11434/api/embeddings")
-SYNTHESIS_MODEL = os.getenv("SYNTHESIS_MODEL", "deepseek-r1:8b")
+SYNTHESIS_MODEL = os.getenv("SYNTHESIS_MODEL", "deepseek-r1:14b")
 ISLM_HOST = os.getenv("ISLM_HOST", "0.0.0.0")
 ISLM_PORT = int(os.getenv("ISLM_PORT", "8100"))
 

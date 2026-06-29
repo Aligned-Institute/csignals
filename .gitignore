@@ -22,5 +22,8 @@ output/
 # Claude internal
 .claude/
 
+# Client files (not for public repo)
+misc/
+
 # macOS
 .DS_Store

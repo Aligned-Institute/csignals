@@ -33,8 +33,22 @@ def route(request: RouterRequest) -> RouterResponse:
         )
         raw = completion.choices[0].message.content
     except Exception as e:
-        logger.error(f"Ollama call failed: {e}")
-        raise
+        if "not found" in str(e).lower() and OLLAMA_MODEL != "gemma2:2b":
+            logger.warning(f"Model '{OLLAMA_MODEL}' not found. Falling back to 'gemma2:2b' for routing classification...")
+            try:
+                completion = client.chat.completions.create(
+                    model="gemma2:2b",
+                    messages=messages,
+                    temperature=0.0,
+                    response_format={"type": "json_object"},
+                )
+                raw = completion.choices[0].message.content
+            except Exception as fallback_e:
+                logger.error(f"Fallback model 'gemma2:2b' also failed: {fallback_e}")
+                raise
+        else:
+            logger.error(f"Ollama call failed: {e}")
+            raise
 
     latency_ms = (time.monotonic() - start) * 1000
 

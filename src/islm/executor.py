@@ -12,6 +12,8 @@ import time
 import logging
 import requests
 import sys
+import asyncio
+import base64
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Optional
 from openai import OpenAI
@@ -251,17 +253,32 @@ def retrieve_mcp_context(agents: List[str]) -> str:
     return "\n\n".join(context_blocks)
 
 
-def execute_query(request: RouterRequest) -> QueryResponse:
-    """Classify routing decision, retrieve context, synthesize response via deepseek-r1:8b."""
-    start_time = time.monotonic()
+def get_tenant_id_from_token(token: Optional[str]) -> str:
+    """Extract tenant_id from JWT payload without verifying the signature."""
+    if not token:
+        return "default-tenant"
+    try:
+        parts = token.split('.')
+        if len(parts) >= 2:
+            payload_b64 = parts[1]
+            payload_b64 += '=' * (4 - len(payload_b64) % 4)
+            payload_bytes = base64.b64decode(payload_b64)
+            payload = json.loads(payload_bytes.decode('utf-8'))
+            if 'app_metadata' in payload and 'tenant_id' in payload['app_metadata']:
+                return str(payload['app_metadata']['tenant_id'])
+            if 'tenant_id' in payload:
+                return str(payload['tenant_id'])
+    except Exception as e:
+        logger.warning(f"Failed to parse tenant_id from token: {e}")
+    return "default-tenant"
 
-    # 1. Call router to classify query
-    router_resp = route_query(request)
-    decision: RoutingDecision = router_resp.decision
 
-    # 2. Retrieve context based on route
+async def _execute_query_async(request: RouterRequest, decision: RoutingDecision) -> Tuple[str, List[SourceDocument], Optional[Dict[str, Any]]]:
+    """Internal async execution flow for parallel fetching and alignment coordination."""
+    tenant_id = get_tenant_id_from_token(request.token)
     context_str = ""
     sources = []
+    aligned_state = None
 
     if decision.route in ("rag", "hybrid"):
         rag_query = decision.rag_query or request.query
@@ -270,9 +287,100 @@ def execute_query(request: RouterRequest) -> QueryResponse:
         context_str += f"## RAG Corporate Intelligence Context:\n{rag_context}\n\n"
 
     if decision.route in ("mcp", "hybrid") and decision.agents:
-        logger.info(f"Executing MCP retrieval for agents: {decision.agents}")
-        mcp_context = retrieve_mcp_context(decision.agents)
-        context_str += f"## Live Market & News Context (MCP):\n{mcp_context}\n\n"
+        logger.info(f"Executing parallel MCP retrieval for agents: {decision.agents}")
+        from .agents import CommodityAgent, MacroAgent, NewsAgent, FeedstockAgent, BriefAgent, AnalyzerAgent
+        from .alignment import AlignmentCoordinator
+        
+        agent_map = {
+            "commodity": CommodityAgent,
+            "macro": MacroAgent,
+            "news": NewsAgent,
+            "feedstock": FeedstockAgent,
+            "brief": BriefAgent,
+            "analyzer": AnalyzerAgent
+        }
+        
+        active_agents = []
+        for name in decision.agents:
+            if name in agent_map:
+                active_agents.append(agent_map[name](tenant_id=tenant_id))
+                
+        if active_agents:
+            # Parallel asyncio.gather fetch
+            agent_outputs = await asyncio.gather(*[a.fetch() for a in active_agents])
+            
+            # Run alignment coordinator
+            coordinator = AlignmentCoordinator(tenant_id=tenant_id)
+            aligned_state = await coordinator.align(request.query, list(agent_outputs))
+            
+            # Format aligned state text for synthesis
+            aligned_state_text = f"### Canonical Aligned State (Aggregate Confidence: {aligned_state['aggregate_confidence']}):\n"
+            aligned_state_text += "Active Agents:\n"
+            for a in aligned_state["agents"]:
+                aligned_state_text += f"  • {a['agent_id']} ({a['freshness_status']}, confidence: {a['confidence']})\n"
+                
+            if aligned_state["conflicts"]:
+                aligned_state_text += "\nActive Conflicts & Resolutions:\n"
+                for c in aligned_state["conflicts"]:
+                    aligned_state_text += f"  • [{c['type'].upper()}] involved agents: {c['agents']}\n"
+                    aligned_state_text += f"    Description: {c['description']}\n"
+                    aligned_state_text += f"    Resolution: {c['resolution']}\n"
+            else:
+                aligned_state_text += "\nNo active conflicts detected.\n"
+                
+            context_str += f"## Canonical Aligned State Context:\n{aligned_state_text}\n\n"
+            
+            # Also append raw text for agent detail context to model
+            raw_contexts = "\n\n".join(a.raw_text for a in agent_outputs)
+            context_str += f"## Detailed Agent Telemetry:\n{raw_contexts}\n\n"
+            
+    return context_str, sources, aligned_state
+
+
+def _call_local_synthesis(client: OpenAI, prompt: str) -> str:
+    """Call local Ollama synthesis with automatic fallback to deepseek-r1:8b if deepseek-r1:14b is not found."""
+    try:
+        completion = client.chat.completions.create(
+            model=SYNTHESIS_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.6,
+        )
+        return completion.choices[0].message.content
+    except Exception as e:
+        if "not found" in str(e).lower() and SYNTHESIS_MODEL != "deepseek-r1:8b":
+            logger.warning(f"Model '{SYNTHESIS_MODEL}' not found. Falling back to 'deepseek-r1:8b' for synthesis...")
+            try:
+                completion = client.chat.completions.create(
+                    model="deepseek-r1:8b",
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.6,
+                )
+                return completion.choices[0].message.content
+            except Exception as inner_e:
+                logger.error(f"Fallback synthesis model 'deepseek-r1:8b' also failed: {inner_e}")
+                raise
+        else:
+            raise
+
+
+def execute_query(request: RouterRequest) -> QueryResponse:
+    """Classify routing decision, retrieve context, synthesize response via deepseek-r1:14b."""
+    start_time = time.monotonic()
+
+    # 1. Call router to classify query
+    router_resp = route_query(request)
+    decision: RoutingDecision = router_resp.decision
+
+    # 2. Retrieve context based on route (running async tasks via loop)
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+    context_str, sources, aligned_state = loop.run_until_complete(
+        _execute_query_async(request, decision)
+    )
 
     # 3. Build synthesis prompt
     context_block = context_str.strip() if context_str else ""
@@ -347,12 +455,7 @@ Your Answer:"""
         else:
             logger.info(f"Executing synthesis via Internal iLLM ({SYNTHESIS_MODEL})")
             client = OpenAI(base_url=OLLAMA_BASE_URL, api_key="local")
-            completion = client.chat.completions.create(
-                model=SYNTHESIS_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.6,
-            )
-            raw_content = completion.choices[0].message.content
+            raw_content = _call_local_synthesis(client, prompt)
             
             # Extract thinking process and clean up the answer
             think_match = re.search(r"<think>(.*?)</think>", raw_content, re.DOTALL)
@@ -368,12 +471,7 @@ Your Answer:"""
             logger.info("Cloud execution failed, falling back to Internal iLLM...")
             try:
                 client = OpenAI(base_url=OLLAMA_BASE_URL, api_key="local")
-                completion = client.chat.completions.create(
-                    model=SYNTHESIS_MODEL,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.6,
-                )
-                raw_content = completion.choices[0].message.content
+                raw_content = _call_local_synthesis(client, prompt)
                 think_match = re.search(r"<think>(.*?)</think>", raw_content, re.DOTALL)
                 if think_match:
                     thinking = think_match.group(1).strip()
@@ -392,5 +490,6 @@ Your Answer:"""
         routing_decision=decision,
         thinking=thinking if thinking else None,
         sources=sources,
-        latency_ms=round(latency_ms, 1)
+        latency_ms=round(latency_ms, 1),
+        aligned_state=aligned_state
     )

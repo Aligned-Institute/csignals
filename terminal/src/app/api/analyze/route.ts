@@ -71,6 +71,7 @@ export async function POST(req: NextRequest) {
 
   const file = formData.get('file') as File | null;
   const selectedSheet = formData.get('sheet') as string | null;
+  const parseOnly = formData.get('parseOnly') === 'true';
 
   if (!file) {
     return NextResponse.json({ error: 'No file provided' }, { status: 400 });
@@ -88,12 +89,57 @@ export async function POST(req: NextRequest) {
   const worksheet = workbook.Sheets[targetSheet];
   const raw: any[][] = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' });
 
-  // Separate headers from data rows
-  const headers: string[] = (raw[0] ?? []).map((h: any) => String(h).trim()).filter(Boolean);
-  const dataRows = raw.slice(1).filter(row => row.some((cell: any) => cell !== ''));
-  const totalRows = dataRows.length;
+  // Find the header row by searching for 'date' or 'worksheet name' in the first cell
+  let headerRowIdx = 0;
+  for (let i = 0; i < Math.min(raw.length, 10); i++) {
+    const row = raw[i] ?? [];
+    const cell0 = String(row[0] ?? '').trim().toLowerCase();
+    if (cell0 === 'date' || cell0 === 'worksheet name') {
+      headerRowIdx = i;
+      break;
+    }
+  }
 
+  // Get raw header row and filter trailing empty headers
+  const rawHeader = raw[headerRowIdx] ?? [];
+  const headers: string[] = [];
+  let lastNonEmptyIdx = -1;
+  for (let i = 0; i < rawHeader.length; i++) {
+    if (String(rawHeader[i] ?? '').trim() !== '') {
+      lastNonEmptyIdx = i;
+    }
+  }
+  
+  const headerSlice = rawHeader.slice(0, lastNonEmptyIdx + 1);
+  for (let i = 0; i < headerSlice.length; i++) {
+    const h = String(headerSlice[i] ?? '').trim();
+    headers.push(h || `Column ${String.fromCharCode(65 + i)}`);
+  }
+
+  // Separate data rows starting after the headers
+  const dataRows = raw.slice(headerRowIdx + 1)
+    .filter(row => row.some((cell: any) => cell !== ''))
+    .map(row => {
+      const newRow = Array(headers.length).fill('');
+      for (let i = 0; i < headers.length; i++) {
+        newRow[i] = row[i] !== undefined ? row[i] : '';
+      }
+      return newRow;
+    });
+
+  const totalRows = dataRows.length;
   const tableText = formatSheetData(dataRows, headers);
+
+  if (parseOnly) {
+    return NextResponse.json({
+      filename: file.name,
+      sheet: targetSheet,
+      sheets: sheetNames,
+      rows: totalRows,
+      columns: headers,
+      dataSample: dataRows,
+    });
+  }
 
   // Construct context block containing spreadsheet data & metadata
   const contextText = `Uploaded File Info:

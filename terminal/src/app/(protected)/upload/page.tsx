@@ -335,13 +335,74 @@ export default function UploadPage() {
   const inputRef                    = useRef<HTMLInputElement>(null);
 
   // New Excel Workspace States
-  const [activeTab, setActiveTab]   = useState<'report' | 'excel'>('report');
+  const [activeTab, setActiveTab]   = useState<'report' | 'excel' | 'pivot'>('report');
   const [activeGridData, setActiveGridData] = useState<any[][]>([]);
   const [editingCell, setEditingCell] = useState<{ rIdx: number; cIdx: number } | null>(null);
   const [editValue, setEditValue]   = useState<string>('');
   const [statsColIdx, setStatsColIdx] = useState<number>(0);
   const [formulaInput, setFormulaInput] = useState<string>('');
   const [formulaResult, setFormulaResult] = useState<any>(null);
+
+  // Full Active Sheet Data State (Complete Rows)
+  const [fullActiveData, setFullActiveData] = useState<any[][] | null>(null);
+
+  // Data Joining States
+  const [leftSheet, setLeftSheet] = useState<string>('');
+  const [rightSheet, setRightSheet] = useState<string>('');
+  const [leftColumns, setLeftColumns] = useState<string[]>([]);
+  const [rightColumns, setRightColumns] = useState<string[]>([]);
+  const [leftKey, setLeftKey] = useState<string>('');
+  const [rightKey, setRightKey] = useState<string>('');
+  const [joinType, setJoinType] = useState<'inner' | 'left'>('inner');
+  const [leftData, setLeftData] = useState<any[][] | null>(null);
+  const [rightData, setRightData] = useState<any[][] | null>(null);
+  const [joinedColumns, setJoinedColumns] = useState<string[]>([]);
+  const [joinedData, setJoinedData] = useState<any[][] | null>(null);
+  const [loadingSheets, setLoadingSheets] = useState(false);
+  const [joiningError, setJoiningError] = useState<string | null>(null);
+
+  // Pivot Table States
+  const [pivotSource, setPivotSource] = useState<'active' | 'joined'>('active');
+  const [pivotRowCol, setPivotRowCol] = useState<string>('');
+  const [pivotColCol, setPivotColCol] = useState<string>('');
+  const [pivotValCol, setPivotValCol] = useState<string>('');
+  const [pivotAggFunc, setPivotAggFunc] = useState<'sum' | 'avg' | 'count' | 'min' | 'max'>('avg');
+  const [pivotDateGroup, setPivotDateGroup] = useState<'none' | 'year' | 'month'>('none');
+  const [pivotResultTable, setPivotResultTable] = useState<{
+    headers: string[];
+    rows: any[][];
+    totals: any;
+  } | null>(null);
+  const [pivotPage, setPivotPage] = useState<number>(1);
+  const PIVOT_ROWS_PER_PAGE = 30;
+
+  // Helper to fetch complete sheet rows client-side in background
+  const fetchSheetData = async (sheetName: string): Promise<{ columns: string[]; data: any[][] } | null> => {
+    if (!file) return null;
+    const fd = new FormData();
+    fd.append('file', file);
+    fd.append('sheet', sheetName);
+    fd.append('parseOnly', 'true');
+    try {
+      const res = await fetch('/api/analyze', { method: 'POST', body: fd });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? 'Failed to parse sheet');
+      return { columns: data.columns, data: data.dataSample };
+    } catch (e: any) {
+      console.error('fetchSheetData error:', e);
+      return null;
+    }
+  };
+
+  // Load full active sheet rows in the background
+  useEffect(() => {
+    if (result) {
+      setFullActiveData(null);
+      fetchSheetData(result.sheet).then(resData => {
+        if (resData) setFullActiveData(resData.data);
+      });
+    }
+  }, [result]);
 
   // Auto-synchronize Grid Data and setup defaults when a new analysis completes
   useEffect(() => {
@@ -359,8 +420,23 @@ export default function UploadPage() {
       setStatsColIdx(firstNumIdx);
       const colLetter = getColLetter(firstNumIdx);
       setFormulaInput(`=AVERAGE(${colLetter}:${colLetter})`);
+      
+      // Default join configuration options
+      setLeftSheet(result.sheets[1] || result.sheets[0] || '');
+      setRightSheet(result.sheets[2] || result.sheets[0] || '');
+      setLeftColumns([]);
+      setRightColumns([]);
+      setLeftKey('');
+      setRightKey('');
+      setLeftData(null);
+      setRightData(null);
+      setJoinedColumns([]);
+      setJoinedData(null);
+      setJoiningError(null);
+      setPivotResultTable(null);
     } else {
       setActiveGridData([]);
+      setFullActiveData(null);
     }
     setFormulaResult(null);
     setActiveTab('report');
@@ -469,6 +545,251 @@ export default function UploadPage() {
     });
     setActiveGridData(updated);
     setEditingCell(null);
+  };
+
+  const loadJoinSheets = async () => {
+    if (!leftSheet || !rightSheet) {
+      setJoiningError('Please select both a left and right sheet.');
+      return;
+    }
+    setLoadingSheets(true);
+    setJoiningError(null);
+    setJoinedData(null);
+    try {
+      const resLeft = await fetchSheetData(leftSheet);
+      if (!resLeft) throw new Error(`Failed to load Left Sheet: ${leftSheet}`);
+      const resRight = await fetchSheetData(rightSheet);
+      if (!resRight) throw new Error(`Failed to load Right Sheet: ${rightSheet}`);
+
+      setLeftColumns(resLeft.columns);
+      setLeftData(resLeft.data);
+      setLeftKey(resLeft.columns[0] || '');
+
+      setRightColumns(resRight.columns);
+      setRightData(resRight.data);
+      setRightKey(resRight.columns[0] || '');
+    } catch (e: any) {
+      setJoiningError(e.message);
+    } finally {
+      setLoadingSheets(false);
+    }
+  };
+
+  const executeJoin = () => {
+    if (!leftData || !rightData || !leftKey || !rightKey) {
+      setJoiningError('Please load sheets first and select valid join keys.');
+      return;
+    }
+    setJoiningError(null);
+
+    const leftKeyIdx = leftColumns.indexOf(leftKey);
+    const rightKeyIdx = rightColumns.indexOf(rightKey);
+
+    if (leftKeyIdx === -1 || rightKeyIdx === -1) {
+      setJoiningError('Selected join keys not found in columns.');
+      return;
+    }
+
+    const mergedCols: string[] = [...leftColumns];
+    rightColumns.forEach((col, idx) => {
+      if (idx !== rightKeyIdx) {
+        if (mergedCols.includes(col)) {
+          mergedCols.push(`${col}_Right`);
+          const origIdx = mergedCols.indexOf(col);
+          if (origIdx !== -1) {
+            mergedCols[origIdx] = `${col}_Left`;
+          }
+        } else {
+          mergedCols.push(col);
+        }
+      }
+    });
+
+    const normKey = (val: any): string => {
+      if (val === null || val === undefined) return '';
+      return String(val).trim().toLowerCase();
+    };
+
+    const rightMap = new Map<string, any[][]>();
+    rightData.forEach(row => {
+      const keyVal = normKey(row[rightKeyIdx]);
+      if (keyVal) {
+        if (!rightMap.has(keyVal)) rightMap.set(keyVal, []);
+        rightMap.get(keyVal)!.push(row);
+      }
+    });
+
+    const joined: any[][] = [];
+
+    leftData.forEach(lRow => {
+      const lKeyVal = normKey(lRow[leftKeyIdx]);
+      const matches = rightMap.get(lKeyVal) ?? [];
+
+      if (matches.length > 0) {
+        matches.forEach(rRow => {
+          const mergedRow = [...lRow];
+          rightColumns.forEach((col, rIdx) => {
+            if (rIdx !== rightKeyIdx) {
+              mergedRow.push(rRow[rIdx] ?? '');
+            }
+          });
+          joined.push(mergedRow);
+        });
+      } else if (joinType === 'left') {
+        const mergedRow = [...lRow];
+        rightColumns.forEach((col, rIdx) => {
+          if (rIdx !== rightKeyIdx) {
+            mergedRow.push('');
+          }
+        });
+        joined.push(mergedRow);
+      }
+    });
+
+    setJoinedColumns(mergedCols);
+    setJoinedData(joined);
+  };
+
+  const generatePivotTable = () => {
+    const sourceCols = pivotSource === 'joined' ? joinedColumns : (result?.columns ?? []);
+    const sourceRows = pivotSource === 'joined' ? (joinedData ?? []) : (fullActiveData ?? activeGridData);
+
+    if (sourceRows.length === 0) {
+      alert('Selected data source contains no rows. Please upload or join data first.');
+      return;
+    }
+
+    const rowIdx = sourceCols.indexOf(pivotRowCol);
+    const valIdx = sourceCols.indexOf(pivotValCol);
+    const colIdx = sourceCols.indexOf(pivotColCol);
+
+    if (rowIdx === -1 || valIdx === -1) {
+      alert('Row dimension and Value field are required.');
+      return;
+    }
+
+    const formatRowVal = (val: any): string => {
+      if (val === null || val === undefined || String(val).trim() === '') return '(blank)';
+      
+      if (pivotDateGroup !== 'none') {
+        let dateVal = val;
+        if (typeof val === 'number' && val > 20000 && val < 60000) {
+          const dateObj = new Date((val - 25569) * 86400 * 1000);
+          if (!isNaN(dateObj.getTime())) {
+            dateVal = dateObj.toISOString().split('T')[0];
+          }
+        }
+        
+        const dateStr = String(dateVal);
+        const parsedDate = new Date(dateStr);
+        if (!isNaN(parsedDate.getTime())) {
+          if (pivotDateGroup === 'year') {
+            return String(parsedDate.getFullYear());
+          }
+          if (pivotDateGroup === 'month') {
+            const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+            return `${parsedDate.getFullYear()}-${months[parsedDate.getMonth()]}`;
+          }
+        }
+      }
+      return String(val).trim();
+    };
+
+    const rowValsMap = new Map<string, any[]>();
+    const colValsSet = new Set<string>();
+
+    sourceRows.forEach(row => {
+      const rowValStr = formatRowVal(row[rowIdx]);
+      const rawVal = cleanNumeric(row[valIdx]);
+
+      let colValStr = 'Value';
+      if (colIdx !== -1) {
+        colValStr = String(row[colIdx] ?? '').trim() || '(blank)';
+        colValsSet.add(colValStr);
+      }
+
+      if (!rowValsMap.has(rowValStr)) {
+        rowValsMap.set(rowValStr, []);
+      }
+      rowValsMap.get(rowValStr)!.push({ colValStr, rawVal });
+    });
+
+    const sortedRowVals = Array.from(rowValsMap.keys()).sort((a, b) => {
+      const numA = Number(a);
+      const numB = Number(b);
+      if (!isNaN(numA) && !isNaN(numB)) return numA - numB;
+      return a.localeCompare(b);
+    });
+
+    const sortedColVals = Array.from(colValsSet).sort((a, b) => {
+      const numA = Number(a);
+      const numB = Number(b);
+      if (!isNaN(numA) && !isNaN(numB)) return numA - numB;
+      return a.localeCompare(b);
+    });
+
+    const pivotCols = sortedColVals.length > 0 ? sortedColVals : ['Value'];
+
+    const runAgg = (vals: number[], func: string): number | string => {
+      if (vals.length === 0) return '';
+      if (func === 'sum') return vals.reduce((a, b) => a + b, 0);
+      if (func === 'avg') return vals.reduce((a, b) => a + b, 0) / vals.length;
+      if (func === 'count') return vals.length;
+      if (func === 'min') return Math.min(...vals);
+      if (func === 'max') return Math.max(...vals);
+      return '';
+    };
+
+    const pivotRows: any[][] = sortedRowVals.map(rowVal => {
+      const items = rowValsMap.get(rowVal) ?? [];
+      const rowOutput: any[] = [rowVal];
+
+      pivotCols.forEach(colVal => {
+        const filteredVals = items
+          .filter(item => sortedColVals.length === 0 || item.colValStr === colVal)
+          .map(item => item.rawVal)
+          .filter((v): v is number => v !== null);
+
+        const aggValue = runAgg(filteredVals, pivotAggFunc);
+        rowOutput.push(aggValue);
+      });
+
+      if (sortedColVals.length > 0) {
+        const allRowVals = items
+          .map(item => item.rawVal)
+          .filter((v): v is number => v !== null);
+        const rowTotal = runAgg(allRowVals, pivotAggFunc);
+        rowOutput.push(rowTotal);
+      }
+
+      return rowOutput;
+    });
+
+    const grandTotals: any[] = ['Grand Total'];
+    pivotCols.forEach(colVal => {
+      const colItemsVals = sourceRows
+        .filter(row => {
+          if (colIdx === -1) return true;
+          return (String(row[colIdx] ?? '').trim() || '(blank)') === colVal;
+        })
+        .map(row => cleanNumeric(row[valIdx]))
+        .filter((v): v is number => v !== null);
+      grandTotals.push(runAgg(colItemsVals, pivotAggFunc));
+    });
+
+    if (sortedColVals.length > 0) {
+      const allVals = sourceRows
+        .map(row => cleanNumeric(row[valIdx]))
+        .filter((v): v is number => v !== null);
+      grandTotals.push(runAgg(allVals, pivotAggFunc));
+    }
+
+    setPivotResultTable({
+      headers: [pivotRowCol, ...pivotCols, ...(sortedColVals.length > 0 ? ['Grand Total'] : [])],
+      rows: pivotRows,
+      totals: grandTotals
+    });
+    setPivotPage(1);
   };
 
   async function analyze(targetSheet?: string) {
@@ -673,6 +994,7 @@ export default function UploadPage() {
             <div className="relative">
               <select
                 value={selectedSheet || result.sheet}
+                disabled={loading}
                 onChange={e => {
                   const s = e.target.value;
                   setSheet(s);
@@ -768,6 +1090,17 @@ export default function UploadPage() {
             >
               Interactive Excel Sandbox
             </button>
+            <button
+              onClick={() => setActiveTab('pivot')}
+              className={cn(
+                "text-sm font-semibold pb-2 border-b-2 transition-all cursor-pointer",
+                activeTab === 'pivot'
+                  ? "border-primary text-primary"
+                  : "border-transparent text-muted-foreground hover:text-foreground"
+              )}
+            >
+              Pivot & Join Sandbox
+            </button>
           </div>
 
           {activeTab === 'report' ? (
@@ -782,7 +1115,7 @@ export default function UploadPage() {
                 </Button>
               </div>
             </div>
-          ) : (
+          ) : activeTab === 'excel' ? (
             <div className="space-y-6 animate-fade-in">
               
               {/* ETL Toolbar */}
@@ -798,34 +1131,36 @@ export default function UploadPage() {
                   Remove Null Rows
                 </Button>
                 
-                <div className="h-4 w-px bg-border" />
-                
-                {/* Barrel to Tonne scaler */}
-                <div className="flex items-center gap-1.5">
+                <div className="flex items-center gap-2 ml-auto">
                   <span className="text-xs text-muted-foreground select-none">Scale:</span>
                   <select
                     value={statsColIdx}
                     onChange={e => setStatsColIdx(Number(e.target.value))}
-                    className="bg-sidebar border border-border text-foreground text-xs rounded px-2 py-1 focus:outline-none"
+                    className="bg-sidebar border border-border text-foreground text-xs rounded px-2.5 py-1 focus:outline-none"
                   >
                     {result.columns.map((c, i) => (
-                      <option key={i} value={i}>{c}</option>
+                      <option key={i} value={i}>{getColLetter(i)}: {c}</option>
                     ))}
                   </select>
                   <Button
                     variant="outline"
                     size="sm"
                     onClick={() => convertBblToTonnes(statsColIdx)}
-                    className="text-xs h-8 text-[#00f3ff] border-[#00f3ff]/20 hover:bg-[#00f3ff]/10 cursor-pointer"
-                    title="Convert standard barrels unit factor of 7.33"
+                    className="text-xs h-8 cursor-pointer"
                   >
-                    7.33x Convert ($/bbl → $/t)
+                    7.33x Convert ($/bbl to $/tonne)
+                  </Button>
+                  
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    onClick={resetData}
+                    className="text-xs h-8 gap-1.5 cursor-pointer ml-3"
+                  >
+                    <RefreshCw className="size-3 h-3" />
+                    Reset Grid
                   </Button>
                 </div>
-
-                <Button variant="ghost" size="sm" onClick={resetData} className="text-xs h-8 ml-auto text-destructive hover:bg-destructive/10 cursor-pointer">
-                  Reset Grid
-                </Button>
               </div>
 
               {/* Descriptive Stats */}
@@ -858,22 +1193,12 @@ export default function UploadPage() {
 
                 return (
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                    {/* Stats display */}
                     <div className="md:col-span-2 rounded-xl border border-border bg-sidebar/20 p-5 space-y-4">
                       <div className="flex items-center justify-between">
                         <h4 className="text-sm font-semibold uppercase tracking-wider text-primary flex items-center gap-2">
                           <BarChart2 className="size-4" />
                           Descriptive Statistics: {result.columns[statsColIdx]}
                         </h4>
-                        <select
-                          value={statsColIdx}
-                          onChange={e => setStatsColIdx(Number(e.target.value))}
-                          className="bg-sidebar border border-border text-foreground text-xs rounded px-2.5 py-1 focus:outline-none"
-                        >
-                          {result.columns.map((c, i) => (
-                            <option key={i} value={i}>{getColLetter(i)}: {c}</option>
-                          ))}
-                        </select>
                       </div>
                       
                       {stats ? (
@@ -885,10 +1210,7 @@ export default function UploadPage() {
                             </div>
                           </div>
                           <div className="p-3 bg-black/30 border border-border/40 rounded-lg">
-                            <div className="text-muted-foreground text-[10px] flex items-center gap-1">
-                              MEDIAN
-                              <span className="text-[9px] text-[#bd00ff] bg-[#bd00ff]/10 px-1 rounded select-none">Outliers Safe</span>
-                            </div>
+                            <div className="text-muted-foreground text-[10px]">MEDIAN</div>
                             <div className="text-lg font-bold text-foreground mt-1">
                               {stats.median.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}
                             </div>
@@ -906,10 +1228,7 @@ export default function UploadPage() {
                             </div>
                           </div>
                           <div className="p-3 bg-black/30 border border-border/40 rounded-lg">
-                            <div className="text-muted-foreground text-[10px] flex items-center gap-1">
-                              STD DEV
-                              <span className="text-[9px] text-primary bg-primary/10 px-1 rounded select-none">Volatility</span>
-                            </div>
+                            <div className="text-muted-foreground text-[10px]">STD DEV</div>
                             <div className="text-lg font-bold text-foreground mt-1">
                               {stats.stdDev.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}
                             </div>
@@ -924,22 +1243,17 @@ export default function UploadPage() {
                       )}
                     </div>
 
-                    {/* Volatility/Outlier tips */}
                     <div className="rounded-xl border border-primary/20 bg-primary/5 p-5 space-y-3 text-xs leading-relaxed">
                       <h4 className="font-semibold text-primary flex items-center gap-1.5 select-none">
                         <HelpCircle className="size-4" />
-                        Statistical Refresher
+                        Understanding Volatility & Outliers
                       </h4>
-                      <div>
-                        <strong className="text-foreground">Why Standard Deviation Matters:</strong>
-                        <p className="text-muted-foreground mt-0.5">
-                          Standard deviation measures price dispersion. High volatility (like benzene precursor pricing shifts) indicates significant feedstock margins risk, calling for strategic hedging.
+                      <div className="space-y-2 text-muted-foreground dark:text-white/80">
+                        <p>
+                          <strong className="text-foreground">Standard Deviation (Std Dev)</strong> measures the dispersion of price signals. A higher Std Dev flags supply-chain cost instability, warning procurement of budget risks.
                         </p>
-                      </div>
-                      <div>
-                        <strong className="text-foreground">Median vs Mean (Outliers):</strong>
-                        <p className="text-muted-foreground mt-0.5">
-                          Extreme prices or coked refinery updates skew standard averages (Mean). The Median filters outlier noise, indicating stable baseline cost levels.
+                        <p>
+                          <strong className="text-foreground">Median</strong> marks the 50th percentile. If Median and Mean diverge significantly, it signals heavy skew from contract outlier prices or spike events.
                         </p>
                       </div>
                     </div>
@@ -949,103 +1263,85 @@ export default function UploadPage() {
 
               {/* Excel Formula Playground */}
               <div className="rounded-xl border border-border bg-sidebar/20 p-5 space-y-4">
-                <h4 className="text-sm font-semibold uppercase tracking-wider text-primary flex items-center gap-2">
+                <h4 className="text-sm font-semibold uppercase tracking-wider text-primary flex items-center gap-2 select-none">
                   <Calculator className="size-4" />
-                  Excel Formula Playground
+                  Excel-Like Formula Playground
                 </h4>
-                
-                <div className="space-y-3">
-                  <div className="flex shadow-sm">
-                    <div className="flex items-center justify-center bg-muted border border-border border-r-0 rounded-l-lg px-3 text-sm font-mono text-muted-foreground select-none">
-                      fx =
-                    </div>
+                <div className="flex flex-col md:flex-row gap-3">
+                  <div className="flex-1 flex items-stretch">
+                    <div className="flex items-center justify-center bg-muted border border-border border-r-0 rounded-l-lg px-3 text-sm font-mono text-muted-foreground select-none">fx</div>
                     <input
                       type="text"
                       value={formulaInput}
                       onChange={e => setFormulaInput(e.target.value)}
-                      placeholder="e.g. =AVERAGE(B:B)"
-                      className="flex-1 bg-background border border-border rounded-none text-sm px-3 py-2 font-mono focus:outline-none focus:ring-1 focus:ring-primary placeholder:text-muted-foreground/40"
+                      placeholder="e.g. =AVERAGE(B:B) or =IFERROR(XLOOKUP(31414, A:A, B:B), 0)"
+                      className="w-full bg-sidebar border border-border rounded-r-lg px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-primary font-mono"
                     />
                   </div>
-
-                  <div className="p-4 rounded-lg bg-black/40 border border-border/60 flex items-center gap-3">
+                  <div className="md:w-60 bg-black/25 border border-border rounded-lg px-4 py-2 flex items-center justify-between min-h-[40px]">
                     <span className="text-xs font-mono text-muted-foreground uppercase tracking-widest select-none">Result:</span>
-                    <div className="font-mono text-sm font-semibold text-[#00ff9d]">
+                    <span className={cn(
+                      "font-mono text-sm font-bold",
+                      String(formulaResult).startsWith('#ERR') ? "text-destructive" : "text-foreground"
+                    )}>
                       {formulaResult !== null ? (
                         typeof formulaResult === 'number'
-                          ? (Number.isInteger(formulaResult) ? formulaResult.toLocaleString() : formulaResult.toFixed(4))
+                          ? formulaResult.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })
                           : String(formulaResult)
                       ) : (
                         <span className="text-muted-foreground italic select-none">Type a formula or click a template...</span>
                       )}
-                    </div>
+                    </span>
                   </div>
+                </div>
 
-                  {/* Templates */}
-                  <div>
-                    <div className="text-[10px] font-mono text-muted-foreground uppercase tracking-wider mb-2 select-none">Interactive Templates (Click to evaluate):</div>
-                    <div className="flex flex-wrap gap-2">
-                      {(() => {
-                        const colLetter0 = getColLetter(0);
-                        const firstRowVal0 = activeGridData[0]?.[0] || '';
-                        
-                        let numColIdx = 0;
-                        for (let i = 0; i < result.columns.length; i++) {
-                          if (activeGridData.some(row => cleanNumeric(row[i]) !== null)) {
-                            numColIdx = i;
-                            break;
-                          }
-                        }
-                        const colLetterNum = getColLetter(numColIdx);
-                        const colNameNum = result.columns[numColIdx] || '';
-                        const colName0 = result.columns[0] || '';
-
-                        const templates = [
-                          {
-                            label: `Average of ${colNameNum || colLetterNum}`,
-                            formula: `=AVERAGE(${colLetterNum}:${colLetterNum})`,
-                          },
-                          {
-                            label: `Sum of ${colNameNum} for ${colName0} = "${firstRowVal0}"`,
-                            formula: `=SUMIFS(${colLetterNum}:${colLetterNum}, ${colLetter0}:${colLetter0}, "${firstRowVal0}")`,
-                          },
-                          {
-                            label: `Lookup ${colNameNum} for ${colName0} = "${firstRowVal0}"`,
-                            formula: `=XLOOKUP("${firstRowVal0}", ${colLetter0}:${colLetter0}, ${colLetterNum}:${colLetterNum})`,
-                          },
-                          {
-                            label: `Count rows where ${colName0} = "${firstRowVal0}"`,
-                            formula: `=COUNTIFS(${colLetter0}:${colLetter0}, "${firstRowVal0}")`,
-                          },
-                          {
-                            label: 'Safe calculation with IFERROR',
-                            formula: `=IFERROR(AVERAGE(${colLetterNum}:${colLetterNum}), 0)`,
-                          }
-                        ];
-
-                        return templates.map((tmpl, tIdx) => (
-                          <button
-                            key={tIdx}
-                            onClick={() => setFormulaInput(tmpl.formula)}
-                            className="text-[11px] font-mono border border-border/80 bg-sidebar/60 text-muted-foreground hover:text-foreground hover:bg-[#bd00ff]/10 hover:border-[#bd00ff]/30 px-2.5 py-1 rounded transition-colors text-left cursor-pointer"
-                          >
-                            <span className="text-[#00f3ff] font-semibold">{tmpl.formula.split('(')[0]}</span>
-                            {tmpl.formula.slice(tmpl.formula.split('(')[0].length)}
-                          </button>
-                        ));
-                      })()}
-                    </div>
+                {/* Formula Template Quick Actions */}
+                <div className="space-y-1">
+                  <div className="text-[10px] font-mono text-muted-foreground uppercase tracking-wider mb-2 select-none">Interactive Templates (Click to evaluate):</div>
+                  <div className="flex flex-wrap gap-2 text-xs font-mono">
+                    <button
+                      onClick={() => setFormulaInput(`=AVERAGE(${getColLetter(statsColIdx)}:${getColLetter(statsColIdx)})`)}
+                      className="px-2 py-1 bg-sidebar border border-border hover:border-primary rounded transition-all cursor-pointer hover:text-primary"
+                    >
+                      AVERAGE({getColLetter(statsColIdx)}:{getColLetter(statsColIdx)})
+                    </button>
+                    {result.columns.length > 2 && (
+                      <>
+                        <button
+                          onClick={() => setFormulaInput(`=SUMIFS(B:B, A:A, ">31415")`)}
+                          className="px-2 py-1 bg-sidebar border border-border hover:border-primary rounded transition-all cursor-pointer hover:text-primary"
+                        >
+                          SUMIFS(B:B, Date &gt; 1986-01-03)
+                        </button>
+                        <button
+                          onClick={() => setFormulaInput(`=COUNTIFS(B:B, ">25.0")`)}
+                          className="px-2 py-1 bg-sidebar border border-border hover:border-primary rounded transition-all cursor-pointer hover:text-primary"
+                        >
+                          COUNTIFS(Prices &gt; $25.00)
+                        </button>
+                        <button
+                          onClick={() => setFormulaInput(`=IFERROR(XLOOKUP(31420, A:A, B:B), "Not Found")`)}
+                          className="px-2 py-1 bg-sidebar border border-border hover:border-primary rounded transition-all cursor-pointer hover:text-primary"
+                        >
+                          XLOOKUP price on Date 31420
+                        </button>
+                      </>
+                    )}
                   </div>
                 </div>
               </div>
 
-              {/* Spreadsheet coordinate grid */}
-              <div className="space-y-2">
-                <div className="flex items-center justify-between text-xs text-muted-foreground font-mono select-none">
-                  <span>Interactive Grid (A-Z Coordinates) — Double click any cell to edit</span>
-                  <span>Displaying first {activeGridData.length} records</span>
+              {/* Data Grid Card */}
+              <div className="rounded-xl border border-border bg-card p-5 space-y-4">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-sm font-semibold uppercase tracking-wider text-primary flex items-center gap-2 select-none">
+                    <Grid className="size-4" />
+                    Coordinate Worksheet Sandbox (First 30 Rows)
+                  </h4>
+                  <span className="text-[10px] text-muted-foreground font-mono select-none">Double-click cells to edit value</span>
                 </div>
-                <div className="border border-border rounded-lg bg-black/40 overflow-auto max-h-96 scrollbar-thin">
+
+                <div className="overflow-x-auto border border-border rounded-lg max-h-[400px]">
                   <table className="w-full text-xs font-mono text-left border-collapse select-text">
                     <thead className="bg-sidebar sticky top-0 z-10 select-none">
                       <tr>
@@ -1099,6 +1395,342 @@ export default function UploadPage() {
                   </table>
                 </div>
               </div>
+
+            </div>
+          ) : (
+            <div className="space-y-6 animate-fade-in">
+              
+              {/* Sheet Joining Card */}
+              <div className="rounded-xl border border-border bg-card p-5 space-y-4">
+                <h4 className="text-sm font-bold uppercase tracking-wider text-primary flex items-center gap-2 select-none">
+                  <Calculator className="size-4" />
+                  Dataset Reconciliation & Joining
+                </h4>
+                <p className="text-xs text-muted-foreground leading-relaxed">
+                  Join data from two different worksheets inside the uploaded workbook. Sourced dates and keys will be automatically normalized to align data points.
+                </p>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  {/* Left Sheet Select */}
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] uppercase text-muted-foreground font-semibold">Left Table (Sheet A)</label>
+                    <select
+                      value={leftSheet}
+                      onChange={e => setLeftSheet(e.target.value)}
+                      className="w-full bg-sidebar border border-border text-foreground text-xs rounded p-2 focus:outline-none focus:ring-1 focus:ring-primary"
+                    >
+                      <option value="">-- Select Sheet --</option>
+                      {result.sheets.map(s => (
+                        <option key={s} value={s}>{s}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Right Sheet Select */}
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] uppercase text-muted-foreground font-semibold">Right Table (Sheet B)</label>
+                    <select
+                      value={rightSheet}
+                      onChange={e => setRightSheet(e.target.value)}
+                      className="w-full bg-sidebar border border-border text-foreground text-xs rounded p-2 focus:outline-none focus:ring-1 focus:ring-primary"
+                    >
+                      <option value="">-- Select Sheet --</option>
+                      {result.sheets.map(s => (
+                        <option key={s} value={s}>{s}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Load/Load Status */}
+                  <div className="flex items-end">
+                    <Button
+                      onClick={loadJoinSheets}
+                      disabled={loadingSheets || !leftSheet || !rightSheet}
+                      variant="outline"
+                      className="w-full text-xs h-9 gap-1.5 cursor-pointer"
+                    >
+                      {loadingSheets ? (
+                        <>
+                          <Loader2 className="size-3.5 animate-spin" />
+                          Loading...
+                        </>
+                      ) : (
+                        <>
+                          <RefreshCw className="size-3.5" />
+                          Load Sheet Data
+                        </>
+                      )}
+                    </Button>
+                  </div>
+                </div>
+
+                {leftData && rightData && (
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-2 animate-fade-in">
+                    {/* Left Key Column */}
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] uppercase text-muted-foreground font-semibold">Join Key Column A</label>
+                      <select
+                        value={leftKey}
+                        onChange={e => setLeftKey(e.target.value)}
+                        className="w-full bg-sidebar border border-border text-foreground text-xs rounded p-2 focus:outline-none focus:ring-1 focus:ring-primary font-mono"
+                      >
+                        {leftColumns.map(c => (
+                          <option key={c} value={c}>{c}</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {/* Right Key Column */}
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] uppercase text-muted-foreground font-semibold">Join Key Column B</label>
+                      <select
+                        value={rightKey}
+                        onChange={e => setRightKey(e.target.value)}
+                        className="w-full bg-sidebar border border-border text-foreground text-xs rounded p-2 focus:outline-none focus:ring-1 focus:ring-primary font-mono"
+                      >
+                        {rightColumns.map(c => (
+                          <option key={c} value={c}>{c}</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {/* Join Type & Button */}
+                    <div className="grid grid-cols-2 gap-2 items-end">
+                      <div className="space-y-1.5">
+                        <label className="text-[10px] uppercase text-muted-foreground font-semibold">Join Type</label>
+                        <select
+                          value={joinType}
+                          onChange={e => setJoinType(e.target.value as 'inner' | 'left')}
+                          className="w-full bg-sidebar border border-border text-foreground text-xs rounded p-2 focus:outline-none focus:ring-1 focus:ring-primary"
+                        >
+                          <option value="inner">Inner Join</option>
+                          <option value="left">Left Join</option>
+                        </select>
+                      </div>
+                      <Button
+                        onClick={executeJoin}
+                        className="text-xs h-9 gap-1.5 bg-primary hover:bg-primary/95 text-primary-foreground font-bold cursor-pointer"
+                      >
+                        <ArrowRight className="size-3.5" />
+                        Execute Join
+                      </Button>
+                    </div>
+                  </div>
+                )}
+
+                {joiningError && (
+                  <p className="text-xs text-destructive bg-destructive/5 border border-destructive/20 p-2.5 rounded-lg font-mono">{joiningError}</p>
+                )}
+
+                {joinedData && (
+                  <div className="rounded-lg border border-primary/20 bg-primary/5 p-4 flex items-center justify-between text-xs animate-page-in font-mono">
+                    <div className="space-y-1">
+                      <div className="font-bold text-foreground">Sheet Join Completed Successfully</div>
+                      <div className="text-muted-foreground">Joined Columns: {joinedColumns.length} | Output Dataset: {joinedData.length} records.</div>
+                    </div>
+                    <Badge className="bg-primary text-primary-foreground text-[10px] px-2 py-0.5 font-bold uppercase select-none">Joined Source Ready</Badge>
+                  </div>
+                )}
+              </div>
+
+              {/* Pivot Builder Card */}
+              <div className="rounded-xl border border-border bg-card p-5 space-y-4">
+                <h4 className="text-sm font-bold uppercase tracking-wider text-primary flex items-center gap-2 select-none">
+                  <Grid className="size-4" />
+                  Pivot Table Creator
+                </h4>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
+                  {/* Source Dropdown */}
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] uppercase text-muted-foreground font-semibold">Data Source</label>
+                    <select
+                      value={pivotSource}
+                      onChange={e => {
+                        const src = e.target.value as 'active' | 'joined';
+                        setPivotSource(src);
+                        setPivotRowCol('');
+                        setPivotColCol('');
+                        setPivotValCol('');
+                        setPivotResultTable(null);
+                      }}
+                      className="w-full bg-sidebar border border-border text-foreground text-xs rounded p-2 focus:outline-none focus:ring-1 focus:ring-primary"
+                    >
+                      <option value="active">Active Sheet (Full Data)</option>
+                      <option value="joined" disabled={!joinedData}>Joined Dataset {!joinedData && '(Run join first)'}</option>
+                    </select>
+                  </div>
+
+                  {/* Row Dimension */}
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] uppercase text-muted-foreground font-semibold">Row Field (Groups)</label>
+                    <select
+                      value={pivotRowCol}
+                      onChange={e => setPivotRowCol(e.target.value)}
+                      className="w-full bg-sidebar border border-border text-foreground text-xs rounded p-2 focus:outline-none focus:ring-1 focus:ring-primary font-mono font-bold text-foreground"
+                    >
+                      <option value="">-- Select Row Field --</option>
+                      {(pivotSource === 'joined' ? joinedColumns : result.columns).map(c => (
+                        <option key={c} value={c}>{c}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Column Dimension */}
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] uppercase text-muted-foreground font-semibold">Column Field (optional)</label>
+                    <select
+                      value={pivotColCol}
+                      onChange={e => setPivotColCol(e.target.value)}
+                      className="w-full bg-sidebar border border-border text-foreground text-xs rounded p-2 focus:outline-none focus:ring-1 focus:ring-primary font-mono"
+                    >
+                      <option value="">-- None --</option>
+                      {(pivotSource === 'joined' ? joinedColumns : result.columns)
+                        .filter(c => c !== pivotRowCol)
+                        .map(c => (
+                          <option key={c} value={c}>{c}</option>
+                        ))}
+                    </select>
+                  </div>
+
+                  {/* Value Column */}
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] uppercase text-muted-foreground font-semibold">Value Field (Metrics)</label>
+                    <select
+                      value={pivotValCol}
+                      onChange={e => setPivotValCol(e.target.value)}
+                      className="w-full bg-sidebar border border-border text-foreground text-xs rounded p-2 focus:outline-none focus:ring-1 focus:ring-primary font-mono"
+                    >
+                      <option value="">-- Select Value Field --</option>
+                      {(pivotSource === 'joined' ? joinedColumns : result.columns)
+                        .filter(c => c !== pivotRowCol && c !== pivotColCol)
+                        .map(c => (
+                          <option key={c} value={c}>{c}</option>
+                        ))}
+                    </select>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-2 items-center">
+                  {/* Aggregation Function */}
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] uppercase text-muted-foreground font-semibold">Aggregation Function</label>
+                    <select
+                      value={pivotAggFunc}
+                      onChange={e => setPivotAggFunc(e.target.value as any)}
+                      className="w-full bg-sidebar border border-border text-foreground text-xs rounded p-2 focus:outline-none focus:ring-1 focus:ring-primary"
+                    >
+                      <option value="avg">AVERAGE</option>
+                      <option value="sum">SUM</option>
+                      <option value="count">COUNT</option>
+                      <option value="min">MIN</option>
+                      <option value="max">MAX</option>
+                    </select>
+                  </div>
+
+                  {/* Date Grouping Option */}
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] uppercase text-muted-foreground font-semibold">Date Grouping Options</label>
+                    <select
+                      value={pivotDateGroup}
+                      onChange={e => setPivotDateGroup(e.target.value as any)}
+                      className="w-full bg-sidebar border border-border text-foreground text-xs rounded p-2 focus:outline-none focus:ring-1 focus:ring-primary"
+                    >
+                      <option value="none">No Grouping (Raw values)</option>
+                      <option value="year">Group by Year</option>
+                      <option value="month">Group by Year-Month</option>
+                    </select>
+                  </div>
+
+                  {/* Execute Button */}
+                  <div className="flex items-end h-full pt-6">
+                    <Button
+                      onClick={generatePivotTable}
+                      disabled={!pivotRowCol || !pivotValCol}
+                      className="w-full text-xs h-9 gap-1.5 bg-primary hover:bg-primary/95 font-bold cursor-pointer"
+                    >
+                      <Calculator className="size-3.5" />
+                      Generate Pivot Table
+                    </Button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Pivot Output Table */}
+              {pivotResultTable && (
+                <div className="rounded-xl border border-border bg-sidebar/20 p-5 space-y-4 animate-page-in">
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-sm font-bold uppercase tracking-wider text-primary font-mono select-none">
+                      Pivot Table: {pivotAggFunc.toUpperCase()} of {pivotValCol} by {pivotRowCol}
+                    </h4>
+                    <span className="text-[10px] text-muted-foreground font-mono select-none">
+                      Rows {((pivotPage - 1) * PIVOT_ROWS_PER_PAGE) + 1} – {Math.min(pivotPage * PIVOT_ROWS_PER_PAGE, pivotResultTable.rows.length)} of {pivotResultTable.rows.length}
+                    </span>
+                  </div>
+
+                  <div className="overflow-x-auto border border-border/60 rounded-lg">
+                    <table className="w-full text-xs font-mono border-collapse text-left select-text">
+                      <thead className="bg-sidebar select-none font-bold text-muted-foreground">
+                        <tr className="border-b border-border">
+                          {pivotResultTable.headers.map((h, i) => (
+                            <th key={i} className="p-2 border-r border-border truncate max-w-[200px]" title={h}>{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {pivotResultTable.rows.slice((pivotPage - 1) * PIVOT_ROWS_PER_PAGE, pivotPage * PIVOT_ROWS_PER_PAGE).map((row, rIdx) => (
+                          <tr key={rIdx} className="border-b border-border/40 hover:bg-white/5 transition-colors">
+                            {row.map((cell, cIdx) => (
+                              <td key={cIdx} className="p-2 border-r border-border font-mono text-foreground/90">
+                                {typeof cell === 'number'
+                                  ? cell.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })
+                                  : String(cell)}
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                        {/* Grand Total Row */}
+                        <tr className="bg-primary/5 font-bold border-t border-border font-mono select-none">
+                          {pivotResultTable.totals.map((total: any, tIdx: number) => (
+                            <td key={tIdx} className="p-2 border-r border-border text-primary font-bold">
+                              {typeof total === 'number'
+                                ? total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })
+                                : String(total)}
+                            </td>
+                          ))}
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {/* Pagination Controls */}
+                  {pivotResultTable.rows.length > PIVOT_ROWS_PER_PAGE && (
+                    <div className="flex items-center justify-between text-xs font-mono select-none pt-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={pivotPage === 1}
+                        onClick={() => setPivotPage(prev => Math.max(prev - 1, 1))}
+                        className="cursor-pointer"
+                      >
+                        Previous Page
+                      </Button>
+                      <span className="text-muted-foreground font-semibold">
+                        Page {pivotPage} of {Math.ceil(pivotResultTable.rows.length / PIVOT_ROWS_PER_PAGE)}
+                      </span>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={pivotPage >= Math.ceil(pivotResultTable.rows.length / PIVOT_ROWS_PER_PAGE)}
+                        onClick={() => setPivotPage(prev => prev + 1)}
+                        className="cursor-pointer"
+                      >
+                        Next Page
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              )}
 
             </div>
           )}
